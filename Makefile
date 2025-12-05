@@ -196,7 +196,16 @@ UPROGS=\
 	$U/_logstress\
 	$U/_forphan\
 	$U/_dorphan\
-        $U/_alarmtest
+        $U/_hello\
+	$U/_find\
+	$U/_pingpong\
+	$U/_testsyscalls\
+	$U/_procinfo\
+	$U/_cpuburn\
+	$U/_ioyield\
+	$U/_iopipe\
+	$U/_boosttest\
+        $U/_alarmtest\
 
 
 ifeq ($(LAB),util)

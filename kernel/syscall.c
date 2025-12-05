@@ -105,9 +105,10 @@ extern uint64 sys_sigalarm(void);
 extern uint64 sys_sigreturn(void);
 extern uint64 sys_sigalarm(void);
 extern uint64 sys_sigreturn(void);
+extern uint64 sys_getsyscallcount(void);
+extern uint64 sys_getprocinfo(void);
+extern uint64 sys_boostproc(void);
 
-// An array mapping syscall numbers from syscall.h
-// to the function that handles the system call.
 static uint64 (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
 [SYS_exit]    sys_exit,
@@ -132,6 +133,9 @@ static uint64 (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 [SYS_sigalarm]   sys_sigalarm,
 [SYS_sigreturn]  sys_sigreturn,
+[SYS_getsyscallcount] sys_getsyscallcount,
+[SYS_getprocinfo] sys_getprocinfo,
+[SYS_boostproc]  sys_boostproc,
 };
 
 void
@@ -145,6 +149,7 @@ syscall(void)
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
     p->trapframe->a0 = syscalls[num]();
+    p->syscall_count++;
   } else {
     printf("%d %s: unknown sys call %d\n",
             p->pid, p->name, num);

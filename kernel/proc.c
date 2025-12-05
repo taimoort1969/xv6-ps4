@@ -6,6 +6,8 @@
 #include "proc.h"
 #include "defs.h"
 
+#define BOOST_INTERVAL 100
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -29,6 +31,18 @@ struct spinlock wait_lock;
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
+
+
+// MLFQ: number of levels and time quanta
+#define NLEVELS 4
+
+int mlfq_quantum[NLEVELS] = {
+  1,  // Q0
+  2,  // Q1
+  4,  // Q2
+  8   // Q3
+};
+
 void
 proc_mapstacks(pagetable_t kpgtbl)
 {
@@ -124,7 +138,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
-
+  p->syscall_count = 0;
   p->alarm_handler = 0;
   p->alarm_ticks = 0;
   p->alarm_trapframe = 0;
@@ -150,7 +164,8 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
-
+  p->qlevel = 0;
+  p->qticks = 0;
   return p;
 }
 
@@ -242,6 +257,10 @@ userinit(void)
   p->state = RUNNABLE;
 
   release(&p->lock);
+ 
+  p->qlevel = 0;
+  p->qticks = 0;
+
 }
 
 // Shrink user memory by n bytes.
@@ -431,43 +450,52 @@ kwait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+
 void
 scheduler(void)
 {
-  struct proc *p;
   struct cpu *c = mycpu();
-
   c->proc = 0;
+  
+  // For round-robin within each level, remember last index we used
+  static int next_index[NLEVELS] = {0, 0, 0, 0};
+
   for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting. Then turn them back off
-    // to avoid a possible race between an interrupt
-    // and wfi.
+// Enable interrupts on this CPU.
     intr_on();
-    intr_off();
+struct proc *p = 0;
+    int level;
 
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+    // Find the highest-priority RUNNABLE process
+    for(level = 0; level < NLEVELS; level++){
+      for(int i = 0; i < NPROC; i++){
+        int idx = (next_index[level] + i) % NPROC;
+        struct proc *candidate = &proc[idx];
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+        acquire(&candidate->lock);
+
+        if(candidate->state == RUNNABLE && candidate->qlevel == level){
+          // Found a process at this level
+          p = candidate;
+          // Next time we start scanning after this index (round-robin)
+          next_index[level] = (idx + 1) % NPROC;
+          goto found;
+        }
+
+        release(&candidate->lock);
       }
-      release(&p->lock);
     }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      asm volatile("wfi");
+
+  found:
+    if(p){
+      // Run the chosen process.
+      p->state = RUNNING;
+      c->proc = p;
+      swtch(&c->context, &p->context);
+
+      // Process is done running for now.
+      c->proc = 0;
+      release(&p->lock);
     }
   }
 }
@@ -696,5 +724,46 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+int
+getprocinfo(void)
+{
+  static char *states[] = {
+    [UNUSED]   "unused",
+    [SLEEPING] "sleep",
+    [RUNNABLE] "runble",
+    [RUNNING]  "run",
+    [ZOMBIE]   "zombie"
+  };
+
+  struct proc *p;
+
+  printf("PID\tSTATE\tQLEVEL\tNAME\n");
+  for(p = proc; p < &proc[NPROC]; p++){
+    if(p->state == UNUSED)
+      continue;
+
+    printf("%d\t%s\t%d\t%s\n",
+           p->pid,
+           states[p->state],
+           p->qlevel,
+           p->name);
+  }
+  return 0;
+}
+
+void
+boost_all(void)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED && p->state != ZOMBIE){
+      p->qlevel = 0;   // top MLFQ level
+      p->qticks = 0;   // reset quantum usage
+    }
+    release(&p->lock);
   }
 }

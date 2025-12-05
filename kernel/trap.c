@@ -6,6 +6,14 @@
 #include "proc.h"
 #include "defs.h"
 
+#define BOOST_INTERVAL 100        // every 100 timer ticks
+
+extern void boost_all(void);      // from proc.c
+
+static int boostcounter = 0;      // counts timer ticks for boosting
+
+extern int mlfq_quantum[];
+
 struct spinlock tickslock;
 uint ticks;
 
@@ -44,7 +52,7 @@ usertrap(void)
 
   // send interrupts and exceptions to kerneltrap(),
   // since we're now in the kernel.
-  w_stvec((uint64)kernelvec);  //DOC: kernelvec
+  w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
   
@@ -68,9 +76,6 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-    if(which_dev == 2) {
-      yield();
-    }
   } else if((r_scause() == 15 || r_scause() == 13) &&
             vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
     // page fault on lazily-allocated page
@@ -83,11 +88,38 @@ usertrap(void)
   if(killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+// give up the CPU if this is a timer interrupt.
+if(which_dev == 2){
 
-  prepare_return();
+  // NEW: global starvation-prevention boost every BOOST_INTERVAL ticks
+  boostcounter++;
+  if(boostcounter >= BOOST_INTERVAL){
+    boost_all();          // move everyone back to Q0
+    boostcounter = 0;     // reset counter
+  }
+
+  // Timer interrupt: account for MLFQ time slice
+  if(p && p->state == RUNNING){
+    // Count how many ticks this process has used at its current level
+    p->qticks++;
+
+    // Has it used up its quantum for this level?
+    if(p->qticks >= mlfq_quantum[p->qlevel]){
+      // Reset tick counter
+      p->qticks = 0;
+
+      // Demote if not already at lowest level (Q3)
+      if(p->qlevel < 3){
+        p->qlevel++;
+      }
+    }
+  }
+
+  // Give up the CPU so the scheduler can pick the next process
+  yield();
+}
+
+prepare_return();
 
   // the user page table to switch to, for trampoline.S
   uint64 satp = MAKE_SATP(p->pagetable);
@@ -173,24 +205,7 @@ clockintr()
     wakeup(&ticks);
     release(&tickslock);
   }
-  struct proc *proc = myproc();
 
-  if (proc && proc->alarm_enabled && proc->alarm_interval > 0) {
-    proc->alarm_ticks--;
-
-    if (proc->alarm_ticks <= 0) {
-      if (!proc->alarm_trapframe)
-        proc->alarm_trapframe = kalloc();
-
-      if (proc->alarm_trapframe) {
-        memmove(proc->alarm_trapframe, proc->trapframe, sizeof(struct trapframe));
-
-        proc->trapframe->epc = (uint64)proc->alarm_handler;
-        proc->alarm_enabled = 0;
-        proc->alarm_ticks = proc->alarm_interval;
-      }
-    }
-  }
   // ask for the next timer interrupt. this also clears
   // the interrupt request. 1000000 is about a tenth
   // of a second.
